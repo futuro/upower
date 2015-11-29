@@ -14,6 +14,8 @@
 
 (defparameter *all-devices* nil)
 
+(defparameter *all-batteries* nil)
+
 (defparameter *devices-info* nil
   "A list of lists containing 
  (battery-name charge% state time-to-full time-to-empty)")
@@ -36,40 +38,44 @@
          (format nil "~a~a~2d%^]^b" symbol color percentage)
          (format nil "~a~2d%^]^b" color percentage))))
 
+(defun update-devices (bus)
+  "Update the list of devices and batteries, clearing out devices info in the process.
+Requires a dbus bus to work on."
+  (setf *all-devices* (upower:enumerate-devices bus))
+  (setf *all-batteries* nil)
+  (setf *devices-info* nil)
+  (loop for device in *all-devices*
+     do (when (eq (upower:device-type bus device) :battery)
+          (push device *all-batteries*)))
+  (update-state bus))
+
+(defun update-state (bus)
+  "Update *devices-info* to reflect current list of batteries and their states."
+  (setf *devices-info*
+        (loop for battery in *all-batteries*
+           collect (list battery
+                         (upower:device-percentage bus battery)
+                         (upower:device-state bus battery)
+                         (upower:device-time-to-full bus battery)
+                         (upower:device-time-to-empty bus battery)))))
+
 (defun main-loop ()
   (dbus:with-open-bus (bus (dbus:system-server-addresses))
-    (let ((batteries nil)
-	  (message nil))
-      (labels ((update-devices ()
-                 (setf *all-devices* (upower:enumerate-devices bus))
-                 (setf *devices-info* nil)
-                 (loop for i in *all-devices*
-                    do (when (eq (upower:device-type bus i) :battery)
-                         (push i batteries)))
-                 (update-state))
-               (update-state ()
-                 (setf *devices-info*
-                       (loop for battery in batteries
-                          collect (list battery 
-                                        (upower:device-percentage bus battery) 
-                                        (upower:device-state bus battery)
-                                        (upower:device-time-to-full bus battery)
-                                        (upower:device-time-to-empty bus battery))))))
-
-	(update-devices)
-	(update-state)
-	(dbus:add-match bus :path "/org/freedesktop/UPower" :interface "org.freedesktop.UPower" :member "DeviceChanged")
-	(dbus:add-match bus :path "/org/freedesktop/UPower" :interface "org.freedesktop.UPower" :member "DeviceAdded")
-	(dbus:add-match bus :path "/org/freedesktop/UPower" :interface "org.freedesktop.UPower" :member "DeviceRemoved")
-	(loop do
-	     (setf message (dbus::wait-for-incoming-message (dbus:bus-connection bus) '(dbus:signal-message)))
-	     (when (typep message 'dbus:signal-message)
-               (let ((type (dbus:message-member message)))
-                 (cond
-                   ((string-equal type "DeviceChanged") (update-state))
-                   ((string-equal type "DeviceAdded")   (update-devices))
-                   ((string-equal type "DeviceRemoved") (update-devices))
-                   (t nil)))))))))
+    (let ((message nil))
+      (update-devices bus)
+      (update-state bus)
+      (dbus:add-match bus :path "/org/freedesktop/UPower" :interface "org.freedesktop.UPower" :member "DeviceChanged")
+      (dbus:add-match bus :path "/org/freedesktop/UPower" :interface "org.freedesktop.UPower" :member "DeviceAdded")
+      (dbus:add-match bus :path "/org/freedesktop/UPower" :interface "org.freedesktop.UPower" :member "DeviceRemoved")
+      (loop do
+           (setf message (dbus::wait-for-incoming-message (dbus:bus-connection bus) '(dbus:signal-message)))
+           (when (typep message 'dbus:signal-message)
+             (let ((type (dbus:message-member message)))
+               (cond
+                 ((string-equal type "DeviceChanged") (update-state bus))
+                 ((string-equal type "DeviceAdded")   (update-devices bus))
+                 ((string-equal type "DeviceRemoved") (update-devices bus))
+                 (t nil))))))))
 
 (defun get-devices-info ()
   *devices-info*)
@@ -94,7 +100,6 @@
   (handler-case (dbus:with-open-bus (bus (dbus:system-server-addresses))
                   (upower:hibernate bus)))
     (error () (format nil "^B^[^1*Error:^] Could not hibernate")))
-
 
 ;;Manager helpers
 
